@@ -1,0 +1,24 @@
+[project]
+name = "llm-text-watermarking"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+    "bitarray>=3.0.0",
+    "datasets>=3.2.0",
+    "openai>=1.59.5",
+    "pytest>=8.3.4",
+    "siphash>=0.0.1",
+]
+
+[tool.ruff.lint]
+select = ["D"]
+
+
+[tool.ruff.lint.pydocstyle]
+convention = "numpy"
+
+[build-system]
+requires = ["setuptools>=42"]
+build-backend = "setuptools.build_meta"

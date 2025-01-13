@@ -1,4 +1,5 @@
 {
+    "python.defaultInterpreterPath": "${env:VSCODE_PYTHON_PATH}",
     "[python]": {
         "editor.formatOnSave": true,
         "editor.defaultFormatter": "charliermarsh.ruff",
@@ -7,9 +8,24 @@
             "source.organizeImports": "explicit"
         },
     },
+
     "notebook.formatOnSave.enabled": true,
     "notebook.codeActionsOnSave": {
         "source.fixAll": "explicit",
         "source.organizeImports": "explicit"
     },
+
+    "[nix]": {
+        "editor.insertSpaces": true,
+        "editor.tabSize": 2,
+        "editor.formatOnSave": true,
+
+    },
+    "nix.serverPath": "nixd",
+    "nix.enableLanguageServer": true,
+    "python.testing.pytestArgs": [
+        "waterllmarks"
+    ],
+    "python.testing.unittestEnabled": false,
+    "python.testing.pytestEnabled": true,
 }
