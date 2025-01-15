@@ -12,7 +12,7 @@
     "notebook.formatOnSave.enabled": true,
     "notebook.codeActionsOnSave": {
         "source.fixAll": "explicit",
-        "source.organizeImports": "explicit"
+        // "source.organizeImports": "explicit"
     },
 
     "[nix]": {
