@@ -1,5 +1,5 @@
 [project]
-name = "llm-text-watermarking"
+name = "waterllmarks"
 version = "0.1.0"
 description = "Add your description here"
 readme = "README.md"
@@ -17,9 +17,11 @@ dependencies = [
     "pydantic>=2.10.5",
     "pytest>=8.3.4",
     "ragas>=0.2.10",
+    "rapidfuzz>=3.11.0",
     "rouge-score>=0.1.2",
     "sacrebleu>=2.5.1",
     "siphash>=0.0.1",
+    "tqdm>=4.67.1",
 ]
 
 [tool.ruff.lint]
@@ -29,6 +31,13 @@ select = ["D"]
 [tool.ruff.lint.pydocstyle]
 convention = "numpy"
 
+[tool.setuptools]
+packages = ["waterllmarks"]
+
 [build-system]
 requires = ["setuptools>=42"]
 build-backend = "setuptools.build_meta"
+
+[tool.distutils.egg_info]
+egg_base = "target"
+

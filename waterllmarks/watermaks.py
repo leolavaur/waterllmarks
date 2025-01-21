@@ -1,5 +1,7 @@
 """Module for text watermarking algorithms."""
 
+import re
+
 from bitarray import bitarray
 from bitarray.util import ba2int, int2ba
 from siphash import siphash24
@@ -67,6 +69,91 @@ class TextWatermark:
             True if the text contains a watermark, False otherwise.
         """
         raise NotImplementedError
+
+
+class TokenWatermark:
+    """Naive token-based watermarking algorithm.
+
+    Parameters
+    ----------
+    key : str
+        The secret key used to generate the token.
+    format : str
+        Python format-string to define the token's decoration. Defaults to "[{}]".
+    front : bool
+        Whether to put the token at the front of the text or at the back of the text.
+        Defaults to True.
+    """
+
+    def __init__(self, key: bytes, format: str = "[{}]", front: bool = True):
+        self.key = key
+        self.format = format
+        self.front = front
+
+    def apply(self, text: str) -> str:
+        """Apply the watermarking algorithm to the given text.
+
+        Parameters
+        ----------
+        text : str
+            The text to be watermarked.
+
+        Returns
+        -------
+        str
+            The watermarked text.
+        """
+        token = self._fingerprint(text)
+        return (
+            self.format.format(token) + text
+            if self.front
+            else text + self.format.format(token)
+        )
+
+    def remove(self, text: str) -> str:
+        """Remove the watermark from the given text.
+
+        Parameters
+        ----------
+        text : str
+            The text to be cleaned.
+
+        Returns
+        -------
+        str
+            The cleaned text.
+        """
+        pattern = re.escape(self.format.format("")).replace(r"\{\}", r"\w+")
+        return re.sub(pattern, "", text).strip()
+
+    def check(self, text: str) -> bool:
+        """Check if the given text contains a valid watermark.
+
+        Parameters
+        ----------
+        text : str
+            The text to be checked.
+
+        Returns
+        -------
+        bool
+            True if the text contains the watermark, False otherwise.
+        """
+        watermark = self._fingerprint(text)
+        pattern = re.escape(self.format.format("")).replace(r"\{\}", r"\w+")
+        match = re.search(pattern, text)
+        if match:
+            token = match.group()
+            return self._fingerprint(token) == watermark
+        return False
+
+    def _fingerprint(self, text: str) -> bitarray:
+        """Generate a SipHash fingerprint of the given text."""
+        sip = siphash24(self.key)
+        sip.update(text.encode())
+        watermark = bitarray()
+        watermark.frombytes(sip.digest())
+        return watermark
 
 
 class Rizzo2016(TextWatermark):
