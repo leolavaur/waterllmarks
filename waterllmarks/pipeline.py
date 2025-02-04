@@ -1,459 +1,198 @@
-"""Implement LLM and text-watermarking pipelines."""
+"""Langchain runnables for WaterLLMarks."""
 
-import asyncio
-import logging
 from concurrent.futures import ThreadPoolExecutor
-from dataclasses import dataclass
-from textwrap import dedent
-from typing import Iterator, TypedDict
+from typing import Any, Callable, Optional
+from uuid import UUID
 
-from langchain.llms.base import LLM as BaseLLM
-from langchain.prompts import PromptTemplate
-from langchain_core.embeddings import Embeddings as BaseEmbeddings
-from langchain_core.messages import AIMessage
-from langchain_core.retrievers import BaseRetriever
-from ragas import SingleTurnSample
-from ragas.embeddings import LangchainEmbeddingsWrapper
-from ragas.llms import LangchainLLMWrapper
-from ragas.metrics import (
-    BleuScore,
-    DistanceMeasure,
-    FactualCorrectness,
-    Faithfulness,
-    LLMContextPrecisionWithoutReference,
-    LLMContextRecall,
-    Metric,
-    NoiseSensitivity,
-    NonLLMStringSimilarity,
-    ResponseRelevancy,
-    RougeScore,
-    SemanticSimilarity,
+from joblib import Memory
+from langchain_core.callbacks import BaseCallbackHandler
+from langchain_core.runnables import (
+    RunnableConfig,
+    RunnablePassthrough,
+    RunnableSequence,
 )
-from tqdm import tqdm
+from langchain_core.runnables.base import Runnable, RunnableSerializable
+from pydantic import BaseModel, Field
+from tqdm.auto import tqdm
 
-from .watermaks import TextWatermark
-
-logger = logging.getLogger(__name__)
-
-
-class Artifact(TypedDict, total=False):
-    """A dictionary to represent the artifacts passed between pipeline steps."""
-
-    query: str
-    context_texts: list[str]
-    context_ids: list[str]
-    answer: str
-    reference: str
+# Custom runnable classes
+# -----------------------
 
 
-class ExecError(Exception):
-    """Raise when an error occurs during pipeline execution."""
+class WLLMKRunnable(RunnableSerializable, BaseModel):
+    """Base class for WaterLLMarks's runnables."""
+
+    class Config:
+        """Pydantic model configuration."""
+
+        arbitrary_types_allowed = True
+        extra = "forbid"
 
 
-class ConfigError(Exception):
-    """Raise when an error occurs when configuring pipelines or steps."""
-
-
-@dataclass
-class ExecConfig:
-    """A class to represent the execution configuration of a pipeline."""
-
-    llm: BaseLLM = None
-    vectordb: BaseRetriever = None
-    watermark: TextWatermark = None
-    embedding: BaseEmbeddings = None
-
-    log: bool = True
-
-
-class Pipeline:
-    """A class to represent a pipeline of steps.
-
-    Data is passed from step to step as "artifacts", Python dictionaries for which the
-    keys are standardized. See the documentation of the Step class to learn more.
+class DictParser(WLLMKRunnable):
+    """A runnable that parses the input for a downstream step.
 
     Parameters
     ----------
-    steps : list[Step | Pipeline], optional
-        A list of pipeline steps, by default []. The steps can be either instances of
-        the Step class or of the Pipeline class, but Steps are preferred. If a Pipeline
-        is given, its steps will be appended to the current pipeline.
-    config : ExecConfig, optional
-        The execution configuration for the pipeline, by default None. If provided,
-        it will be used to configure each step in the pipeline.
+    required_fields : list[str]
+        The list of required fields in the input dictionary.
     """
 
-    def __init__(
+    required_fields: str | list[str] = Field()
+
+    def __init__(self, required_fields: str | list[str], **kwargs) -> None:
+        """Overwrite Basemodel's `__init__` to allow positional arguments."""
+        super().__init__(required_fields=required_fields, **kwargs)
+
+    def invoke(
+        self, input: dict[str, Any], config: RunnableConfig = None
+    ) -> Any | dict[str, Any]:
+        """Parse the input dictionary."""
+        if isinstance(self.required_fields, str):
+            return input[self.required_fields]
+
+        ouptut = {
+            field: (input[field] if field in input else None)
+            for field in self.required_fields
+            if field in input
+        }
+
+        return ouptut
+
+
+class DictWrapper(WLLMKRunnable):
+    """A runnable that wraps the input for a downstream step.
+
+    Parameters
+    ----------
+    name : str
+        The name of the field to wrap the input in.
+    """
+
+    name: str = Field()
+
+    def invoke(self, input: Any, config: RunnableConfig = None) -> dict[str, Any]:
+        """Wrap the input dictionary."""
+        return {self.name: input}
+
+
+class RunnableTryFix(WLLMKRunnable):
+    """A runnable that attempts multiple fixes if a primary step fails.
+
+    Parameters
+    ----------
+    primary_step : Runnable
+        The primary step to run.
+    fix_step : Runnable
+        The fix step to run if the primary step fails.
+    max_retries : int, optional
+        The maximum number of retries, by default 3.
+    log_failures : bool, optional
+        Whether to log failures in the output dictionary, by default False. Raises an
+        error if the input is not a dictionary.
+    """
+
+    primary_step: Runnable = Field()
+    fix_step: Runnable = Field()
+    max_retries: int = Field(default=3, gt=0)
+    log_failures: bool = Field(default=False)
+
+    def invoke(self, input: Any, config: RunnableConfig = None) -> Any:
+        """Invoke the primary step and retry with the fix step if it fails."""
+        if self.log_failures and not isinstance(input, dict):
+            raise ValueError("Input must be a dictionary to log failures.")
+
+        counter = 0
+        current_input = input
+        while counter < self.max_retries:
+            try:
+                # Try the primary step
+                if self.log_failures:
+                    return self.primary_step.invoke(current_input, config) | {
+                        "failures": counter
+                    }
+                return self.primary_step.invoke(current_input, config)
+            except Exception as e:
+                if counter == self.max_retries - 1:
+                    # If max retries reached, re-raise the last exception
+                    raise
+
+                # Apply fix step
+                current_input = self.fix_step.invoke(current_input, config)
+                counter += 1
+
+        # This should never be reached due to max_retries logic
+        raise RuntimeError("Unexpected error in multi-retry pipeline")
+
+
+class ProgressBarCallback(BaseCallbackHandler):
+    """A callback handler that updates a progress bar after each chain run.
+
+    See Also
+    --------
+    https://gist.github.com/BrandonStudio/638a629911e47fee29175ca5c0b7430c
+    """
+
+    def __init__(self, total: int):
+        super().__init__()
+        self.progress_bar = tqdm(total=total)  # define a progress bar
+
+    def on_chain_end(
         self,
-        steps: list["Step | Pipeline"] = [],
-        config: ExecConfig = None,
-        name: str = None,
-    ):
-        self.steps = steps
-        self.history = []
+        response: Any,
+        *,
+        run_id: UUID,
+        parent_run_id: UUID | None = None,
+        **kwargs: Any,
+    ) -> Any:
+        if parent_run_id is None:
+            self.progress_bar.update(1)
+        return response
 
-        if config is not None:
-            self.config = config
-
-        if name is None:
-            name = self.__class__.__name__
-        self.name = name
-
-    def __call__(self, artifacts: Artifact) -> Artifact:
-        """Run the pipeline on the given input."""
-        logger.info(f"Starting {self.name}.")
-        self.history.append(artifacts)
-
-        try:
-            for step in self.steps:
-                logger.info(f"Running step {step.name}")
-                artifacts = step(artifacts)
-                self.history.append(artifacts)
-        except Exception as e:
-            raise e
-            artifacts = {"error": str(e)}
-        return artifacts
-
-    def __or__(self, value) -> "Pipeline":
-        """Combine pipeline steps using the | operator."""
-        if isinstance(value, Step):
-            self.steps.append(value)
-        elif isinstance(value, Pipeline):
-            self.steps.extend(value.steps)
-        else:
-            raise ValueError("Invalid value for pipeline step.")
+    def __enter__(self):
+        self.progress_bar.__enter__()
         return self
 
-    def configure(self, config: ExecConfig = None, recurse: bool = True):
-        """Configure the pipeline with the given execution configuration."""
-        if config is not None:
-            self.config = config
+    def __exit__(self, exc_type, exc_value, exc_traceback):
+        self.progress_bar.__exit__(exc_type, exc_value, exc_traceback)
 
-        if self.config is None:
-            # No configuration was provided, and none was found in the class.
-            raise ConfigError("No configuration available for pipeline.")
-
-        if recurse:
-            for step in self.steps:
-                step.configure(self.config)
-
-    def apply(
-        self,
-        dataset: list[Artifact],
-        max_workers: int = None,
-        show_progress: bool = True,
-    ) -> list[Artifact]:
-        """Process a list of dictionaries through the pipeline.
-
-        Parameters
-        ----------
-        dataset : list[Artifact]
-            A list of dictionaries to process.
-        max_workers : int, optional
-            The number of workers to use for parallel processing, by default None.
-        show_progress : bool, optional
-            Whether to show a progress bar, by default True.
-        """
-        if not max_workers:  # Sequential processing
-            iterator = tqdm(dataset) if show_progress else dataset
-            return [self(item) for item in iterator]
-
-        # Parallel processing
-        with ThreadPoolExecutor(max_workers=max_workers) as executor:
-            results = []
-            # for i in range(0, len(dataset), batch_size):
-            #     batch = dataset[i : i + batch_size]
-            #     futures = [executor.submit(self, item) for item in batch]
-            #     batch_results = [f.result() for f in futures]
-            #     results.extend(batch_results)
-            # return results
-
-            futures = [executor.submit(self, item) for item in dataset]
-            iterator = tqdm(futures) if show_progress else futures
-            return [f.result() for f in iterator]
-
-    def apply_iter(
-        self, dataset: list[Artifact] | Iterator[Artifact], batch_size: int = None
-    ) -> Iterator[Artifact]:
-        """Process a dataset through the pipeline, yielding results as they complete.
-
-        Useful for large datasets that shouldn't be held in memory all at once.
-
-        Parameters
-        ----------
-        dataset : list[Artifact] | Iterator[Artifact]
-            A list or iterator of dictionaries to process.
-        batch_size : int, optional
-            The number of items to process in each batch, by default None.
-        """
-        if batch_size:
-            batch = []
-            for item in dataset:
-                batch.append(item)
-                if len(batch) == batch_size:
-                    for processed in self.apply(batch):
-                        yield processed
-                    batch = []
-            if batch:  # Process remaining items
-                for processed in self.apply(batch):
-                    yield processed
-        else:
-            for item in dataset:
-                yield self(item)
+    def __del__(self):
+        self.progress_bar.__del__()
 
 
-def requires(fields: list[str]):
-    """Ensure the input dictionary contains the required fields."""
+class ThreadedSequence(RunnableSequence):
+    """A RunnableSequence that runs each input in a separate thread.
 
-    def decorator(call_func):
-        def wrapper(self: Step, artifacts: Artifact) -> Artifact:
-            for field in fields:
-                if field not in artifacts:
-                    raise ValueError(
-                        f"Field '{field}' is required but not found in input."
+    ThreadedSequence overrides the `batch` method to run each input in a separate
+    thread, instead of step-by-step parallism as done in RunnableSequence.
+
+    See Also
+    --------
+    langchain_core.runnables.RunnableSequence
+    """
+
+    def batch(self, input: list[Any], config: RunnableConfig = None) -> list[Any]:
+        """Run each input in a separate thread."""
+        max_workers = config.get("max_workers", None) if config else None
+
+        with ProgressBarCallback(total=len(input)) as pg:
+            config = config or {}
+            if "callbacks" in config:
+                if any(
+                    isinstance(cb, ProgressBarCallback) for cb in config["callbacks"]
+                ):
+                    pass
+                else:
+                    config["callbacks"].append(pg)
+            else:
+                config["callbacks"] = [pg]
+
+            with ThreadPoolExecutor(max_workers=max_workers) as executor:
+                outputs = list(
+                    executor.map(
+                        lambda x: self.invoke(x, config),
+                        input,
                     )
-            return call_func(self, artifacts)
-
-        return wrapper
-
-    return decorator
-
-
-def configured(fields: list[str] = []):
-    """Ensure the step is configured with an execution configuration."""
-
-    def decorator(call_func):
-        def wrapper(self: Step, artifacts: Artifact) -> Artifact:
-            if self.config is None:
-                raise ValueError(
-                    f"Step '{self.__class__.__name__}' cannot run without configuration."
                 )
-            for field in fields:
-                if getattr(self.config, field, None) is None:
-                    raise ValueError(
-                        f"Configuration field '{field}'"
-                        " is required to execute step '{self.__class__.__name__}'."
-                    )
-            return call_func(self, artifacts)
 
-        return wrapper
-
-    return decorator
-
-
-class Step:
-    """A class to represent a pipeline step.
-
-    Steps are the building blocks of a pipeline. They consume and produce dictionaries
-    according to the following schema:
-    ```python
-    {
-        "query": str,
-        "context_texts": list[str],
-        "context_ids": list[str],
-        "answer": str,
-        "reference": str,
-    }
-    ```
-
-    Although all the fields are technically optional, each Step can require specific
-    fields using the `@requires` decorator on the __call__ magic method.
-    """
-
-    def __init__(self, config: ExecConfig = None, name: str = None):
-        self.config = config
-        if name is None:
-            name = self.__class__.__name__
-        self.name = name
-
-    def __or__(self, value) -> Pipeline:
-        """Combine step with another step or pipeline using the | operator."""
-        if isinstance(value, Step):
-            return Pipeline([self, value])
-
-    def configure(self, config: ExecConfig):
-        """Configure the step with the given execution configuration."""
-        self.config = config
-
-
-class LLM(Step):
-    """A Step to generate text using a LLM.
-
-    Consumes: "query"
-    Produces: "answer"
-    """
-
-    default_prompt = PromptTemplate(
-        input_variables=["query"],
-        template=dedent("""You are a helpful assistant.
-        
-        Question: {query}
-        
-        Answer: """),
-    )
-
-    def __init__(self, *args, prompt: PromptTemplate = None, **kwargs):
-        super().__init__(*args, **kwargs)
-
-        if prompt is None:
-            prompt = self.default_prompt
-
-        self.prompt = prompt
-
-    @requires(["query"])
-    @configured(["llm"])
-    def __call__(self, artifacts: Artifact) -> Artifact:
-        """Generate text using the LLM."""
-        chain = self.prompt | self.config.llm
-        reply: AIMessage = chain.invoke(artifacts)
-        artifacts["answer"] = reply.content
-
-        return artifacts
-
-
-class RAGLLM(LLM):
-    """A Step to generate text using a LLM and a context.
-
-    Consumes: "query", "context"
-    Produces: "answer"
-    """
-
-    default_prompt = PromptTemplate(
-        input_variables=["query", "context"],
-        template=dedent("""Your are an helpful assistant.
-                        
-        Context: {context}
-         
-        Question: {query}
-        
-        Answer: """),
-    )
-
-    @requires(["query", "context"])
-    def __call__(self, artifacts):
-        """Generate text using the LLM."""
-        return super().__call__(artifacts)
-
-
-class VectorDB(Step):
-    """A Step to retrieve context from a vector store.
-
-    Consumes: "query"
-    Produces: "context", "chunks"
-    """
-
-    @requires(["query"])
-    @configured(["vectordb"])
-    def __call__(self, artifacts):
-        """Query the DB to return the k most relevant entries."""
-        db = self.config.vectordb
-        docs = db.invoke(artifacts["query"])
-        artifacts["chunks"] = [doc.page_content for doc in docs]
-        artifacts["chunk_ids"] = [doc.id for doc in docs]
-        artifacts["context"] = "\n\n".join(artifacts["chunks"])
-        return artifacts
-
-
-class Watermark(Step):
-    """A Step to watermark text with an invisible message."""
-
-    @requires(["query"])
-    @configured(["watermark"])
-    def __call__(self, artifacts):
-        """Watermark the text with the invisible message."""
-        marker = self.config.watermark
-        artifacts["query"] = marker.apply(artifacts["query"])
-
-        return artifacts
-
-
-class Evaluate(Step):
-    """A Step to evaluate the quality of the generated text."""
-
-    @requires(["query", "answer", "reference", "context"])
-    @configured(["llm", "embedding"])
-    def __call__(self, artifacts):
-        """Evaluate the quality of the generated text."""
-        data = SingleTurnSample(
-            user_input=artifacts["query"],
-            retrieved_contexts=artifacts["chunks"],
-            response=artifacts["answer"],
-            reference=artifacts["reference"],
-        )
-        llm = LangchainLLMWrapper(self.config.llm)
-        embeddings = LangchainEmbeddingsWrapper(self.config.embedding)
-
-        async def compute_metrics():
-            metrics = {
-                # Non-LLM metrics
-                "blue": BleuScore(),
-                "rouge": RougeScore(),
-                "levenstein_sim": NonLLMStringSimilarity(),
-                # LLM-based metrics
-                "context_precision": LLMContextPrecisionWithoutReference(llm=llm),
-                "context_recall": LLMContextRecall(llm=llm),
-                "noise_sensitivity": NoiseSensitivity(llm=llm),
-                "response_relevancy": ResponseRelevancy(llm=llm, embeddings=embeddings),
-                "faithfulness": Faithfulness(llm=llm),
-                "factual_correctness": FactualCorrectness(llm=llm),
-                "semantic_similarity": SemanticSimilarity(embeddings=embeddings),
-            }
-
-            async with asyncio.TaskGroup() as tg:
-                tasks = {
-                    name: tg.create_task(metric.single_turn_ascore(data))
-                    for name, metric in metrics.items()
-                }
-
-            results = {}
-            for name, task in tasks.items():
-                results[name] = task.result()
-
-            # Calculate F1 score after gathering results
-            results["context_f1"] = (
-                2
-                * results["context_precision"]
-                * results["context_recall"]
-                / (results["context_precision"] + results["context_recall"])
-            )
-
-            return results
-
-        artifacts["metrics"] = asyncio.run(compute_metrics())
-        return artifacts
-
-
-class QueryAugmentation(Step):
-    """A Step to augment the query size to fit a watermark.
-
-    Parameters
-    ----------
-    size : int, optional
-        The aimed size for the query.
-    """
-
-    def __init__(self, *args, size: int = 100, **kwargs):
-        super().__init__(*args, **kwargs)
-        self.size = size
-
-    @requires(["query"])
-    @configured(["llm"])
-    def __call__(self, artifacts):
-        """Augment the query size."""
-        default_prompt = PromptTemplate(
-            input_variables=["query"],
-            template=dedent(f"""
-            You are a helpful assistant, specialized in query augmentation. 
-            Your goal is to make the query longer, while keeping the same meaning.
-            
-            Minimal query size: {self.size}
-
-            Query: {artifacts["query"]}
-            """),
-        )
-
-        chain = default_prompt | self.config.llm
-        reply: AIMessage = chain.invoke(artifacts)
-        artifacts["query"] = reply.content
-
-        return artifacts
+        return outputs

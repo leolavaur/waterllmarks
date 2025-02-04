@@ -1,4 +1,11 @@
 .env
+
+# WaterLLMarks specific
+chroma_langchain_db/
+ntlk_data/
+*.db
+
+# --------------------
 # Created by https://www.toptal.com/developers/gitignore/api/visualstudiocode,direnv,python
 # Edit at https://www.toptal.com/developers/gitignore?templates=visualstudiocode,direnv,python
 

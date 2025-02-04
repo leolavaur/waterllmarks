@@ -2,7 +2,7 @@
 
 import pytest
 
-from waterllmarks.watermaks import Rizzo2016, TextWatermark
+from waterllmarks.watermarks import Rizzo2016, TextWatermark, TokenWatermark
 
 
 def _test_watermark(algorithm: TextWatermark):
@@ -31,4 +31,10 @@ def test_rizzo2016():
     with pytest.raises(TypeError):
         algorithm = Rizzo2016("test")
     algorithm = Rizzo2016(b"0123456789ABCDEF")
+    _test_watermark(algorithm)
+
+
+def test_tokenwatermark():
+    """Test the TokenWatermark algorithm."""
+    algorithm = TokenWatermark(b"0123456789ABCDEF")
     _test_watermark(algorithm)
