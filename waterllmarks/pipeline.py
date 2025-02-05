@@ -109,7 +109,8 @@ class RunnableTryFix(WLLMKRunnable):
                 # Try the primary step
                 if self.log_failures:
                     return self.primary_step.invoke(current_input, config) | {
-                        "failures": counter
+                        "failures": counter,
+                        "last_input": current_input,
                     }
                 return self.primary_step.invoke(current_input, config)
             except Exception as e:

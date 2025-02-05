@@ -10,6 +10,7 @@ import numpy as np
 import pandas as pd
 import ragas.evaluation
 import ragas.metrics
+from joblib import Memory
 from langchain_core.callbacks import Callbacks
 from langchain_core.documents import Document
 from nltk import word_tokenize
@@ -271,7 +272,7 @@ class WLLMKResult:
             results = {0: result}
 
         if len(results) == 0:
-            raise ValueError("At least one result must be provided.")
+            return
 
         if len(results) == 1:
             _, res = results.popitem()
@@ -305,7 +306,32 @@ class WLLMKResult:
         with path.open("wb") as file:
             pickle.dump(self, file)
 
+    @staticmethod
+    def load(path: str | Path) -> "WLLMKResult":
+        """Load evaluation results from a file using pickle.
 
+        Parameters
+        ----------
+        path : str | Path
+            The path to load the evaluation results from. If a string is provided, it
+            will be converted to a `Path` object.
+
+        Returns
+        -------
+        WLLMKResult
+            The loaded evaluation results.
+        """
+        if isinstance(path, str):
+            path = Path(path)
+
+        with path.open("rb") as file:
+            return pickle.load(file)
+
+
+memory = Memory(".cache/joblib")
+
+
+# @memory.cache
 def evaluate(
     pipeline_results: list["PipelineResult"],
     metrics: list[Metric],
@@ -404,7 +430,7 @@ DEFAULT_ALL_METRICS: list[Metric] = (
 
 
 def _module_setup() -> None:
-    _data_dir = "./nltk_data"
+    _data_dir = ".cache/nltk_data"
     nltk.data.path = [_data_dir]
     nltk.download("punkt_tab", download_dir=_data_dir)
     nltk.download("wordnet", download_dir=_data_dir)
