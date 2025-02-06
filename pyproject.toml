@@ -27,6 +27,7 @@ dependencies = [
     "seaborn>=0.13.2",
     "siphash>=0.0.1",
     "streamlit>=1.41.1",
+    "tikzplotlib>=0.10.1",
     "tqdm>=4.67.1",
     "transformers>=4.48.2",
 ]
