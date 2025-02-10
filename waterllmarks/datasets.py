@@ -51,12 +51,17 @@ class LLMPaperDataset(WLLMKDataset):
                     k: (v if v is not None else "")
                     for k, v in entry["metadata"].items()
                 }
-                title, _, content = entry["contents"].partition("\n")
-                if len(content) == 0:
-                    content = title
-                    metadata["title"] = ""
-                else:
-                    metadata["title"] = title.partition(" ")[2]
+                content = entry["contents"]
+                # if content.startswith("# "):
+                #     splits = content.split("#", 2)
+                #     if len(splits) == 3:
+                #         _, title, content_rest = splits
+                #         metadata["title"] = title.strip()
+                #         content = content_rest.strip()
+                #     else:
+                #         metadata["title"] = ""
+                # else:
+                #     metadata["title"] = ""
                 doc = Document(
                     id=entry["doc_id"], page_content=content.strip(), metadata=metadata
                 )
