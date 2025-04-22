@@ -47,5 +47,5 @@ requires = ["setuptools>=42"]
 build-backend = "setuptools.build_meta"
 
 [tool.distutils.egg_info]
+# Do not forget to create the `target` directory
 egg_base = "target"
-
